@@ -107,7 +107,10 @@ WHEELS = {
 
 class Keyboard:
     def __init__(self):
-        keys = {CTRL, SHIFT}
+        # Declare a full keyboard (all standard key codes), not just the keys the wheels
+        # use: udev only tags a device ID_INPUT_KEYBOARD when it has the full main block,
+        # and the compositor ignores or mistranslates keys from non-keyboard devices.
+        keys = set(range(e.KEY_ESC, e.KEY_MICMUTE + 1))
         for _, slots in WHEELS.values():
             for _, steps in slots:
                 for step in steps:
