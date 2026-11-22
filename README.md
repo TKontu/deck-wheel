@@ -11,8 +11,8 @@ draws its own wheel and types the hotkeys itself.
 |---|---|
 | Touch a stick | Its wheel appears in the middle of the screen |
 | Push the stick | Highlights a slot |
-| Press **R1** | Runs the highlighted slot |
-| Lift your thumb | Cancels |
+| **Let go** | The stick snaps back and the slot runs (R1 also runs it) |
+| Ease the stick back slowly | Cancels |
 
 Default wheels (clockwise from the top), built for [herdr](https://herdr.dev) and Claude Code:
 

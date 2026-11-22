@@ -3,7 +3,8 @@
 
 Touch a stick  -> its wheel appears
 Push the stick -> highlight a slot
-Press R1       -> run the highlighted slot (lift your thumb to cancel)
+Let go         -> the stick snaps back and the slot runs (R1 also runs it)
+Ease back      -> moving the stick slowly back to the centre cancels
 
 It also makes room for Steam's on-screen keyboard: when the keyboard opens, the
 active window shrinks to the space above it, and it is restored when the keyboard
@@ -34,6 +35,8 @@ APP_ID = "io.github.deckwheel"
 SIZE = 520                 # window is SIZE x SIZE px
 SHOW_DEFLECT = 9000        # show the wheel when pushed this far even without the touch sensor
 SELECT_DEFLECT = 14000     # push past this to highlight a slot (of 32767)
+RELEASE_DEFLECT = 6000     # below this the stick counts as back in the centre
+FLICK_TIME = 0.12          # back to centre faster than this = let go (run); slower = eased back (cancel)
 HIDE_DELAY = 0.15          # seconds after the thumb lifts before the wheel hides
 PREFIX_GAP = 0.08          # seconds between Ctrl+B and the herdr action key
 
@@ -262,7 +265,7 @@ class Wheel(Gtk.DrawingArea):
         cr.arc(cx, cy, r_in, 0, 2 * math.pi)
         cr.fill()
         self._text(cr, self.title, cx, cy - 8, 22, bold=True)
-        self._text(cr, "R1 to run", cx, cy + 18, 13, alpha=0.6)
+        self._text(cr, "let go to run", cx, cy + 18, 13, alpha=0.6)
 
     @staticmethod
     def _text(cr, text, x, y, size, bold=False, alpha=1.0):
@@ -283,6 +286,7 @@ class App(Gtk.Application):
         self.selected = None
         self.last_touch = 0.0
         self.prev_r1 = False
+        self.last_high = 0.0        # last time the stick was pushed out far enough to select
         self.pending = False        # an update is already queued for the UI thread
         self.locked = None          # side that just fired; ignore it until the thumb lifts
 
@@ -357,25 +361,46 @@ class App(Gtk.Application):
                     break
         if self.active:
             s = sticks[self.active]
+            mag = math.hypot(s.x, s.y)
+            if self.selected is not None and mag < RELEASE_DEFLECT:
+                # stick back in the centre: a quick snap-back runs the slot, easing back cancels
+                if now - self.last_high <= FLICK_TIME:
+                    self.fire(f"let go after {int((now - self.last_high) * 1000)} ms")
+                    self.prev_r1 = R1["down"]
+                    return False
+                print(f"{self.active} wheel: eased back, cancelled", flush=True)
+                self.selected = self.wheel.selected = None
+                self.wheel.queue_draw()
             if engaged(s):
                 self.last_touch = now
-                if math.hypot(s.x, s.y) > SELECT_DEFLECT:
+                if mag > SELECT_DEFLECT:
+                    self.last_high = now
                     ang = math.atan2(s.x, s.y) % (2 * math.pi)   # 0 = up, clockwise
                     n = len(WHEELS[self.active][1])
                     sel = int(round(ang / (2 * math.pi / n))) % n
                     if sel != self.selected:
                         self.selected = self.wheel.selected = sel
                         self.wheel.queue_draw()
-                if R1["down"] and not self.prev_r1 and self.selected is not None:
-                    self.kb.run(WHEELS[self.active][1][self.selected][1])
-                    self.locked = self.active
-                    self.close()
+                if R1["down"] and not self.prev_r1:
+                    if self.selected is None:
+                        print(f"{self.active} wheel: R1 pressed but no slot highlighted", flush=True)
+                        self.prev_r1 = True
+                        return False
+                    self.fire("R1")
             elif now - self.last_touch > HIDE_DELAY:
                 self.close()
         self.prev_r1 = R1["down"]
         return False
 
+    def fire(self, how):
+        label, steps = WHEELS[self.active][1][self.selected]
+        print(f"{self.active} wheel: run '{label}' ({how})", flush=True)
+        self.kb.run(steps)
+        self.locked = self.active   # ignore this stick until the thumb lifts
+        self.close()
+
     def open(self, side):
+        print(f"{side} wheel: open", flush=True)
         self.active, self.selected = side, None
         self.wheel.title, self.wheel.slots = WHEELS[side]
         self.wheel.selected = None
