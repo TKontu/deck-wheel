@@ -7,6 +7,12 @@ cd "$(dirname "$0")"
 install -Dm644 deck_wheel.py ~/.local/share/deck-wheel/deck_wheel.py
 install -Dm644 deck-wheel.service ~/.config/systemd/user/deck-wheel.service
 
+# KWin script that makes room for Steam's on-screen keyboard
+mkdir -p ~/.local/share/kwin/scripts
+rm -rf ~/.local/share/kwin/scripts/deckwheel-osk
+cp -r kwin/deckwheel-osk ~/.local/share/kwin/scripts/
+kwriteconfig6 --file kwinrc --group Plugins --key deckwheel-oskEnabled true
+
 # KWin rule: keep the wheel window centred, on top, borderless and unable to take focus
 R=deck-wheel-overlay
 k() { kwriteconfig6 --file kwinrulesrc --group "$R" --key "$1" "$2"; }

@@ -1,0 +1,14 @@
+{
+    "KPlugin": {
+        "Id": "deckwheel-osk",
+        "Name": "deck-wheel OSK room",
+        "Description": "Shrinks the active window above the Steam on-screen keyboard and restores it afterwards (driven by deck-wheel).",
+        "Authors": [{ "Name": "tkontu" }],
+        "License": "MIT",
+        "Version": "1.0",
+        "EnabledByDefault": true
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "KPackageStructure": "KWin/Script"
+}

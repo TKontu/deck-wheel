@@ -5,6 +5,10 @@ Touch a stick  -> its wheel appears
 Push the stick -> highlight a slot
 Press R1       -> run the highlighted slot (lift your thumb to cancel)
 
+It also makes room for Steam's on-screen keyboard: when the keyboard opens, the
+active window shrinks to the space above it, and it is restored when the keyboard
+closes (via the deckwheel-osk KWin script).
+
 Reads the Deck controller directly from hidraw (alongside Steam), draws the wheel
 with GTK4, and types the hotkeys through a uinput virtual keyboard, so it works in
 every app, Wayland-native ones included.
@@ -22,7 +26,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from evdev import UInput, ecodes as e  # noqa: E402
 
@@ -174,6 +178,43 @@ def parse(d, left, right):
     right.touched = bool(d[13] & 0x80)
     left.x, left.y, right.x, right.y = struct.unpack_from("<hhhh", d, 48)
 
+# ---------------------------------------------------------------- on-screen keyboard room
+
+STEAM_UI_LOG = os.path.expanduser("~/.local/share/Steam/logs/controller_ui.txt")
+
+
+def kwin_shortcut(name):
+    """Invoke a shortcut registered by the deckwheel-osk KWin script."""
+    try:
+        Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync(
+            "org.kde.kglobalaccel", "/component/kwin", "org.kde.kglobalaccel.Component",
+            "invokeShortcut", GLib.Variant("(s)", (name,)), None, Gio.DBusCallFlags.NONE, 2000, None)
+    except GLib.Error as err:
+        print("kwin shortcut failed:", err.message, file=sys.stderr, flush=True)
+
+
+def watch_osk():
+    """Follow Steam's controller UI log; it records every keyboard open/close."""
+    f, ino, first = None, None, True
+    while True:
+        try:
+            st = os.stat(STEAM_UI_LOG)
+            if f is None or st.st_ino != ino or st.st_size < f.tell():
+                if f:
+                    f.close()
+                f, ino = open(STEAM_UI_LOG, errors="replace"), st.st_ino
+                if first:                     # skip history; a new/rotated log is read from the start
+                    f.seek(0, os.SEEK_END)
+                    first = False
+            for line in f.readlines():
+                if "Set OSK active 1" in line:
+                    kwin_shortcut("DeckWheelOskShrink")
+                elif "Set OSK active 0" in line:
+                    kwin_shortcut("DeckWheelOskRestore")
+        except OSError:
+            f = None
+        time.sleep(0.15)
+
 # ---------------------------------------------------------------- UI
 
 
@@ -260,6 +301,7 @@ class App(Gtk.Application):
             GLib.timeout_add(4000, lambda: self.quit())
             return
         threading.Thread(target=self.read_loop, daemon=True).start()
+        threading.Thread(target=watch_osk, daemon=True).start()
 
     def _click_through(self, win):
         surf = win.get_surface()

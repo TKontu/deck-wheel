@@ -21,6 +21,16 @@ Default wheels (clockwise from the top), built for [herdr](https://herdr.dev) an
 
 Edit `WHEELS` near the top of `deck_wheel.py` to change them.
 
+### Room for the on-screen keyboard
+
+Steam's on-screen keyboard (Steam + X, or X in the Desktop layout) floats over the
+bottom of the screen, and KDE doesn't resize windows for it, so the prompt in a
+terminal ends up hidden. deck-wheel follows Steam's controller log, which records
+every keyboard open and close. When the keyboard opens, the `deckwheel-osk` KWin
+script shrinks the active window to the space above it. When the keyboard closes,
+the window goes back to its exact previous size, or to maximized. The keyboard's
+height is set by `KEYBOARD_TOP` in `kwin/deckwheel-osk/contents/code/main.js`.
+
 ## How it works
 
 - **Input:** reads the Deck controller's raw HID reports (`/dev/hidraw*`, report `0x09`)
@@ -40,8 +50,9 @@ python-evdev) and the `deck` user's default access to `/dev/hidraw*` and `/dev/u
 ./install.sh
 ```
 
-This copies the app to `~/.local/share/deck-wheel/`, adds the KWin rule, and enables the
-`deck-wheel` user service, which starts with Plasma (Desktop Mode only).
+This copies the app to `~/.local/share/deck-wheel/`, installs the `deckwheel-osk` KWin
+script, adds the KWin overlay rule, and enables the `deck-wheel` user service, which
+starts with Plasma (Desktop Mode only).
 
 ### Steam layout
 
@@ -65,6 +76,8 @@ using Steam's own radial menus, which do draw in Gaming Mode.
 ```sh
 systemctl --user disable --now deck-wheel
 rm -r ~/.local/share/deck-wheel ~/.config/systemd/user/deck-wheel.service
+kwriteconfig6 --file kwinrc --group Plugins --key deckwheel-oskEnabled false
+rm -r ~/.local/share/kwin/scripts/deckwheel-osk
 ```
 
 Then restore your Desktop layout backup the same way (with Steam closed).
