@@ -36,6 +36,13 @@ the fixed-order window cycling used by the Next/Prev window slots. When the keyb
 the window goes back to its exact previous size, or to maximized. The keyboard's
 height is set by `KEYBOARD_TOP` in `kwin/deckwheel-osk/contents/code/main.js`.
 
+Steam's keyboard keeps typing at the window it was opened on, so after any focus change
+(another window, the taskbar, a desktop switch) it would go dead. While it is open, the KWin
+script follows focus: the newly active window gets the room above the keyboard (the previous
+one is restored), and deck-wheel quickly closes and reopens Steam's keyboard so it types into
+the new window. If Steam misses the reopen, deck-wheel retries once and otherwise restores the
+window, so nothing is left shrunk.
+
 ## How it works
 
 - **Input:** reads the Deck controller's raw HID reports (`/dev/hidraw*`, report `0x09`)

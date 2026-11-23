@@ -19,6 +19,7 @@ import glob
 import math
 import os
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -194,7 +195,9 @@ def parse(d, left, right):
 # ---------------------------------------------------------------- on-screen keyboard room
 
 STEAM_UI_LOG = os.path.expanduser("~/.local/share/Steam/logs/controller_ui.txt")
-OSK = {"open": False}      # whether Steam's on-screen keyboard is open (logged for diagnosis)
+OSK = {"open": False,      # whether Steam's on-screen keyboard is open
+       "reopen_until": 0.0}  # while we close+reopen it ourselves, its own close/open events
+                             # are ignored so the window doesn't jump back and forth
 
 
 def kwin_shortcut(name):
@@ -231,11 +234,18 @@ def watch_osk():
                     f.seek(0, os.SEEK_END)
                     first = False
             for line in f.readlines():
+                reopening = time.time() < OSK["reopen_until"]
                 if "Set OSK active 1" in line:
                     OSK["open"] = True
-                    print("steam keyboard: open", flush=True)
-                    kwin_shortcut("DeckWheelOskShrink")
+                    if reopening:
+                        OSK["reopen_until"] = 0.0          # reopen done
+                        print("steam keyboard: reopened", flush=True)
+                    else:
+                        print("steam keyboard: open", flush=True)
+                        kwin_shortcut("DeckWheelOskShrink")
                 elif "Set OSK active 0" in line:
+                    if reopening:
+                        continue                          # our own close; keep the layout
                     OSK["open"] = False
                     print("steam keyboard: closed", flush=True)
                     kwin_shortcut("DeckWheelOskRestore")
@@ -348,6 +358,10 @@ class App(Gtk.Application):
             win.set_child(self.wheels[side])
             win.connect("map", self._click_through)
             win.present()           # mapped once and kept; hiding = drawing nothing
+        retarget = Gio.SimpleAction.new("osk-retarget", None)   # called by the KWin script
+        retarget.connect("activate", self._osk_retarget)
+        self.add_action(retarget)
+        self._retarget_timer = 0
         self.hold()
         if DEMO:                    # --demo <left|right> <slot>: show a wheel for 4 s (for testing)
             self.open(DEMO[0])
@@ -356,6 +370,46 @@ class App(Gtk.Application):
             return
         threading.Thread(target=self.read_loop, daemon=True).start()
         threading.Thread(target=watch_osk, daemon=True).start()
+
+    def _osk_retarget(self, *_):
+        """Focus moved while Steam's keyboard is open: reopen it so it types into the new
+        window (Steam's keyboard keeps targeting the window it was opened on)."""
+        if not OSK["open"]:
+            return
+        if self._retarget_timer:                     # debounce bursts (e.g. desktop switch)
+            GLib.source_remove(self._retarget_timer)
+        self._retarget_timer = GLib.timeout_add(120, self._reopen_osk)
+
+    def _reopen_osk(self):
+        self._retarget_timer = 0
+        print("steam keyboard: focus changed, reopening it for the new window", flush=True)
+        OSK["reopen_until"] = time.time() + 3.0
+
+        def reopened(wait):
+            end = time.time() + wait
+            while time.time() < end:
+                if OSK["reopen_until"] == 0.0:       # watch_osk saw the keyboard open again
+                    return True
+                time.sleep(0.05)
+            return False
+
+        def run():
+            steam = lambda url: subprocess.run(["steam", url], capture_output=True, timeout=10)
+            steam("steam://close/keyboard")
+            time.sleep(0.15)
+            steam("steam://open/keyboard")
+            if reopened(1.2):
+                return
+            print("steam keyboard: didn't reopen, retrying", flush=True)
+            steam("steam://open/keyboard")
+            if reopened(1.5):
+                return
+            # it stayed closed: we ignored its close event, so restore the layout now
+            print("steam keyboard: still closed, restoring the window", flush=True)
+            OSK["open"], OSK["reopen_until"] = False, 0.0
+            kwin_shortcut("DeckWheelOskRestore")
+        threading.Thread(target=run, daemon=True).start()
+        return False
 
     def _click_through(self, win):
         surf = win.get_surface()
