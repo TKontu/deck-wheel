@@ -220,6 +220,17 @@ def kwin_call(method):
         print(f"kwin {method} failed:", err.message, file=sys.stderr, flush=True)
 
 
+def screen_locked():
+    """True while KDE's lock screen is up (Steam's keyboard can't show above it)."""
+    try:
+        r = Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync(
+            "org.freedesktop.ScreenSaver", "/ScreenSaver", "org.freedesktop.ScreenSaver",
+            "GetActive", None, GLib.VariantType("(b)"), Gio.DBusCallFlags.NONE, 1000, None)
+        return bool(r.unpack()[0])
+    except GLib.Error:
+        return False
+
+
 def watch_osk():
     """Follow Steam's controller UI log; it records every keyboard open/close."""
     f, ino, first = None, None, True
@@ -240,6 +251,8 @@ def watch_osk():
                     if reopening:
                         OSK["reopen_until"] = 0.0          # reopen done
                         print("steam keyboard: reopened", flush=True)
+                    elif screen_locked():
+                        print("steam keyboard: open while locked, layout left alone", flush=True)
                     else:
                         print("steam keyboard: open", flush=True)
                         kwin_shortcut("DeckWheelOskShrink")
