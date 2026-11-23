@@ -14,10 +14,14 @@ draws its own wheel and types the hotkeys itself.
 | **Let go** | Lifting your thumb runs the slot; for side flicks the touch sensor misses, the stick snapping back runs it (R1 also works) |
 | Ease the dot into the dashed centre circle | Cancels |
 
-Default wheels (clockwise from the top), built for [herdr](https://herdr.dev) and Claude Code:
+Default wheels, built for [herdr](https://herdr.dev) and Claude Code. Each wheel appears next
+to its stick, in the top half of the screen, so Steam's on-screen keyboard never covers it.
 
-- **Left stick, herdr:** New tab, Next tab, Split right, Workspaces, Detach, Goto, Split down, Previous tab
+- **Left stick:** ↑ New tab · ↗ Next tab · → Next window · ↘ Next desktop · ↓ Close tab ·
+  ↙ Prev desktop · ← Prev window · ↖ Prev tab (tabs are herdr tabs; windows cycle through all
+  windows on the desktop in a fixed order; desktops via KWin)
 - **Right stick, Edit:** Ctrl+B, Paste, Shift+Tab, Newline, Ctrl+C, Esc Esc, Clear line, Copy
+  (clockwise from the top)
 
 Edit `WHEELS` near the top of `deck_wheel.py` to change them.
 
@@ -27,7 +31,8 @@ Steam's on-screen keyboard (Steam + X, or X in the Desktop layout) floats over t
 bottom of the screen, and KDE doesn't resize windows for it, so the prompt in a
 terminal ends up hidden. deck-wheel follows Steam's controller log, which records
 every keyboard open and close. When the keyboard opens, the `deckwheel-osk` KWin
-script shrinks the active window to the space above it. When the keyboard closes,
+script shrinks the active window to the space above it. The same KWin script also provides
+the fixed-order window cycling used by the Next/Prev window slots. When the keyboard closes,
 the window goes back to its exact previous size, or to maximized. The keyboard's
 height is set by `KEYBOARD_TOP` in `kwin/deckwheel-osk/contents/code/main.js`.
 

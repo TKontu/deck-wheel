@@ -36,3 +36,35 @@ function restore() {
 
 registerShortcut("DeckWheelOskShrink", "deck-wheel: make room for the on-screen keyboard", "", shrink);
 registerShortcut("DeckWheelOskRestore", "deck-wheel: restore after the on-screen keyboard", "", restore);
+
+// ---- window cycling for the deck-wheel "Next window" / "Prev window" slots ----
+// Alt+Tab uses most-recently-used order, so repeating it only toggles between two windows.
+// These walk all normal windows on the current desktop in a fixed order (order opened).
+var order = [];                      // windows in the order they appeared
+
+function trackable(w) {
+    return w && w.normalWindow && !w.skipSwitcher &&
+        String(w.resourceClass) !== "io.github.deckwheel";
+}
+workspace.windowList().forEach(function (w) { if (trackable(w)) order.push(w); });
+workspace.windowAdded.connect(function (w) { if (trackable(w)) order.push(w); });
+workspace.windowRemoved.connect(function (w) {
+    var i = order.indexOf(w);
+    if (i >= 0) order.splice(i, 1);
+});
+
+function onCurrentDesktop(w) {
+    return w.onAllDesktops || w.desktops.indexOf(workspace.currentDesktop) >= 0;
+}
+
+function cycle(step) {
+    var list = order.filter(onCurrentDesktop);
+    if (list.length === 0) return;
+    var i = list.indexOf(workspace.activeWindow);
+    var next = list[(i < 0 ? 0 : i + step + list.length) % list.length];
+    if (next.minimized) next.minimized = false;
+    workspace.activeWindow = next;
+}
+
+registerShortcut("DeckWheelNextWindow", "deck-wheel: next window (fixed order)", "", function () { cycle(1); });
+registerShortcut("DeckWheelPrevWindow", "deck-wheel: previous window (fixed order)", "", function () { cycle(-1); });

@@ -33,7 +33,8 @@ from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 from evdev import UInput, ecodes as e  # noqa: E402
 
 APP_ID = "io.github.deckwheel"
-SIZE = 520                 # window is SIZE x SIZE px
+SIZE = 360                 # each wheel window is SIZE x SIZE px; KWin rules place the left
+                           # wheel top-left and the right wheel top-right, above Steam's keyboard
 SHOW_DEFLECT = 9000        # show the wheel when pushed this far even without the touch sensor
 HUB = 0.42                 # centre circle (cancel zone) radius as a fraction of the wheel
 SELECT_DEFLECT = int(32767 * HUB)   # dot outside the centre circle = a slot is highlighted
@@ -92,11 +93,11 @@ WHEELS = {
     "left": ("herdr", [
         ("New tab", herdr("c")),
         ("Next tab", herdr("n")),
-        ("Split right", herdr("v")),
-        ("Workspaces", herdr("w")),
-        ("Detach", herdr("q")),
-        ("Goto", herdr("g")),
-        ("Split down", herdr("-")),
+        ("Next window", lambda: kwin_shortcut("DeckWheelNextWindow")),
+        ("Next desktop", lambda: kwin_call("nextDesktop")),
+        ("Close tab", [combo(CTRL, "b"), combo(SHIFT, "x")]),
+        ("Prev desktop", lambda: kwin_call("previousDesktop")),
+        ("Prev window", lambda: kwin_shortcut("DeckWheelPrevWindow")),
         ("Prev tab", herdr("p")),
     ]),
     "right": ("Edit", [
@@ -122,7 +123,7 @@ class Keyboard:
         keys = set(range(e.KEY_ESC, e.KEY_MICMUTE + 1))
         for _, slots in WHEELS.values():
             for _, steps in slots:
-                for step in steps:
+                for step in ([] if callable(steps) else steps):
                     keys.update(step)
         self.ui = UInput({e.EV_KEY: sorted(keys)}, name="deck-wheel keyboard")
         self.lock = threading.Lock()
@@ -193,6 +194,7 @@ def parse(d, left, right):
 # ---------------------------------------------------------------- on-screen keyboard room
 
 STEAM_UI_LOG = os.path.expanduser("~/.local/share/Steam/logs/controller_ui.txt")
+OSK = {"open": False}      # whether Steam's on-screen keyboard is open (logged for diagnosis)
 
 
 def kwin_shortcut(name):
@@ -203,6 +205,16 @@ def kwin_shortcut(name):
             "invokeShortcut", GLib.Variant("(s)", (name,)), None, Gio.DBusCallFlags.NONE, 2000, None)
     except GLib.Error as err:
         print("kwin shortcut failed:", err.message, file=sys.stderr, flush=True)
+
+
+def kwin_call(method):
+    """Call a KWin D-Bus method, e.g. nextDesktop / previousDesktop."""
+    try:
+        Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync(
+            "org.kde.KWin", "/KWin", "org.kde.KWin", method, None, None,
+            Gio.DBusCallFlags.NONE, 2000, None)
+    except GLib.Error as err:
+        print(f"kwin {method} failed:", err.message, file=sys.stderr, flush=True)
 
 
 def watch_osk():
@@ -220,8 +232,12 @@ def watch_osk():
                     first = False
             for line in f.readlines():
                 if "Set OSK active 1" in line:
+                    OSK["open"] = True
+                    print("steam keyboard: open", flush=True)
                     kwin_shortcut("DeckWheelOskShrink")
                 elif "Set OSK active 0" in line:
+                    OSK["open"] = False
+                    print("steam keyboard: closed", flush=True)
                     kwin_shortcut("DeckWheelOskRestore")
         except OSError:
             f = None
@@ -243,6 +259,7 @@ class Wheel(Gtk.DrawingArea):
         if not self.slots:          # hidden: window stays mapped but fully transparent
             return
         cx, cy = w / 2, h / 2
+        k = min(w, h) / 520                            # scale relative to the original 520 px design
         r_out = min(w, h) / 2 - 6
         r_in = r_out * HUB
         n = len(self.slots) or 1
@@ -267,7 +284,7 @@ class Wheel(Gtk.DrawingArea):
             cr.stroke()
             mid = a0 + step / 2
             rl = (r_in + r_out) / 2 + 8
-            self._text(cr, label, cx + rl * math.cos(mid), cy + rl * math.sin(mid), 19,
+            self._text(cr, label, cx + rl * math.cos(mid), cy + rl * math.sin(mid), 19 * k + 2,
                        bold=(i == self.selected))
         cr.set_source_rgba(0.14, 0.15, 0.18, 1)        # centre = cancel zone
         cr.arc(cx, cy, r_in, 0, 2 * math.pi)
@@ -278,9 +295,9 @@ class Wheel(Gtk.DrawingArea):
         cr.arc(cx, cy, r_in, 0, 2 * math.pi)
         cr.stroke()
         cr.set_dash([])
-        self._text(cr, self.title, cx, cy - 10, 22, bold=True)
+        self._text(cr, self.title, cx, cy - 10 * k, 22 * k + 2, bold=True)
         self._text(cr, "let go to run" if self.selected is not None else "centre = cancel",
-                   cx, cy + 16, 13, alpha=0.6)
+                   cx, cy + 16 * k, 13 * k + 2, alpha=0.6)
         dx, dy = self.dot                              # live stick position
         px, py = cx + dx * (r_out - 10), cy - dy * (r_out - 10)
         cr.set_source_rgba(0, 0, 0, 0.6)
@@ -313,7 +330,7 @@ class App(Gtk.Application):
         self.last_draw = 0.0
         self.prev_touched = False
         self.pending = False        # a redraw is already queued for the UI thread
-        self.view = {"title": "", "slots": [], "selected": None, "dot": (0.0, 0.0)}
+        self.view = {"side": None, "title": "", "slots": [], "selected": None, "dot": (0.0, 0.0)}
         self.candidate, self.candidate_since = None, 0.0   # slot being switched to
         self.locked = None          # side that just fired; ignore it until the thumb lifts
 
@@ -322,12 +339,15 @@ class App(Gtk.Application):
         css.load_from_data(b"window, window.background { background: transparent; box-shadow: none; }")
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        self.win = Gtk.Window(application=self, title="deck-wheel", decorated=False, resizable=False)
-        self.win.set_default_size(SIZE, SIZE)
-        self.wheel = Wheel()
-        self.win.set_child(self.wheel)
-        self.win.connect("map", self._click_through)
-        self.win.present()          # mapped once and kept; hiding = drawing nothing
+        self.wheels = {}
+        for side in ("left", "right"):  # one window per stick; KWin rules (by title) place them
+            win = Gtk.Window(application=self, title=f"deck-wheel-{side}", decorated=False,
+                             resizable=False)
+            win.set_default_size(SIZE, SIZE)
+            self.wheels[side] = Wheel()
+            win.set_child(self.wheels[side])
+            win.connect("map", self._click_through)
+            win.present()           # mapped once and kept; hiding = drawing nothing
         self.hold()
         if DEMO:                    # --demo <left|right> <slot>: show a wheel for 4 s (for testing)
             self.open(DEMO[0])
@@ -436,15 +456,22 @@ class App(Gtk.Application):
     def draw(self):
         self.pending = False
         v = dict(self.view)
-        self.wheel.title, self.wheel.slots = v["title"], v["slots"]
-        self.wheel.selected, self.wheel.dot = v["selected"], v["dot"]
-        self.wheel.queue_draw()
+        for side, wheel in self.wheels.items():
+            mine = side == v["side"]
+            if not mine and not wheel.slots:
+                continue                                 # idle and already blank
+            wheel.title, wheel.slots = v["title"], (v["slots"] if mine else [])
+            wheel.selected, wheel.dot = v["selected"], v["dot"]
+            wheel.queue_draw()
         return False
 
     def fire(self, how):
         label, steps = WHEELS[self.active][1][self.selected]
         print(f"{self.active} wheel: run '{label}' ({how})", flush=True)
-        self.kb.run(steps)
+        if callable(steps):
+            threading.Thread(target=steps, daemon=True).start()
+        else:
+            self.kb.run(steps)
         self.locked = self.active   # ignore this stick until the thumb lifts
         self.close()
 
@@ -454,7 +481,7 @@ class App(Gtk.Application):
         self.dbg = {"peak": 0.0, "ang": 0.0, "touch": 0, "n": 0}
         self.touch_seen = False     # did the touch sensor see the thumb during this use?
         title, slots = WHEELS[side]
-        self.view.update(title=title, slots=slots, selected=None, dot=(0.0, 0.0))
+        self.view.update(side=side, title=title, slots=slots, selected=None, dot=(0.0, 0.0))
         self.prev_touched = True
         self.last_touch = time.time()
         self.request_draw(self.last_touch, force=True)
