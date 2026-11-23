@@ -5,14 +5,14 @@ On-screen hotkey wheels for the Steam Deck's sticks in **Desktop Mode**.
 Steam's own radial menus don't draw on the KDE Wayland desktop, so deck-wheel
 draws its own wheel and types the hotkeys itself.
 
-![The two wheels: herdr (left stick) and Edit (right stick)](docs/wheels.png)
+![The herdr wheel with a slot picked, and the Edit wheel with the dot in the centre cancel zone](docs/wheels.png)
 
 | Step | Action |
 |---|---|
 | Touch a stick | Its wheel appears in the middle of the screen |
-| Push the stick | Highlights a slot |
-| **Let go** | The stick snaps back and the slot runs (R1 also runs it) |
-| Ease the stick back slowly | Cancels |
+| Push the stick | A dot follows the stick; the slot under it is highlighted |
+| **Let go** | Lifting your thumb runs the slot; for side flicks the touch sensor misses, the stick snapping back runs it (R1 also works) |
+| Ease the dot into the dashed centre circle | Cancels |
 
 Default wheels (clockwise from the top), built for [herdr](https://herdr.dev) and Claude Code:
 
@@ -34,8 +34,10 @@ height is set by `KEYBOARD_TOP` in `kwin/deckwheel-osk/contents/code/main.js`.
 ## How it works
 
 - **Input:** reads the Deck controller's raw HID reports (`/dev/hidraw*`, report `0x09`)
-  alongside Steam: stick positions, the sticks' touch sensors, and R1. It always acts on
-  the newest report, so the wheel doesn't lag behind the stick.
+  alongside Steam: stick positions, the sticks' touch sensors, and R1. Every report (~250 Hz)
+  is evaluated in the input thread, so quick flicks aren't missed; the UI only draws the
+  latest state. Swaying with the thumb on the stick never runs a slot, and the spring's
+  overshoot on release can't switch to the opposite slot.
 - **Output:** types hotkeys through a `uinput` virtual keyboard, so it works in every app,
   Wayland-native ones included. It corrects the `-` key position for de/fi/se layouts.
 - **UI:** a GTK4 window that stays mapped, transparent and click-through. A KWin rule

@@ -3,8 +3,9 @@
 
 Touch a stick  -> its wheel appears
 Push the stick -> highlight a slot
-Let go         -> the stick snaps back and the slot runs (R1 also runs it)
-Ease back      -> moving the stick slowly back to the centre cancels
+Let go         -> lifting your thumb off the stick runs the slot (R1 also runs it);
+                  for side flicks the touch sensor misses, a quick snap back runs it
+Ease back      -> resting the dot in the centre circle, thumb still on, cancels
 
 It also makes room for Steam's on-screen keyboard: when the keyboard opens, the
 active window shrinks to the space above it, and it is restored when the keyboard
@@ -34,9 +35,14 @@ from evdev import UInput, ecodes as e  # noqa: E402
 APP_ID = "io.github.deckwheel"
 SIZE = 520                 # window is SIZE x SIZE px
 SHOW_DEFLECT = 9000        # show the wheel when pushed this far even without the touch sensor
-SELECT_DEFLECT = 14000     # push past this to highlight a slot (of 32767)
-RELEASE_DEFLECT = 6000     # below this the stick counts as back in the centre
-FLICK_TIME = 0.12          # back to centre faster than this = let go (run); slower = eased back (cancel)
+HUB = 0.42                 # centre circle (cancel zone) radius as a fraction of the wheel
+SELECT_DEFLECT = int(32767 * HUB)   # dot outside the centre circle = a slot is highlighted
+CANCEL_DWELL = 0.15        # dot resting in the centre circle this long, thumb still on = cancel
+                           # (a slot runs when the thumb lifts off the stick while it is highlighted)
+SWITCH_HOLD = 0.05         # a different slot must stay pointed at this long to replace the
+                           # highlighted one (ignores the spring overshoot when you let go)
+SNAP_DEFLECT = 7000        # side flicks (touch sensor never sees the thumb): the stick snapping
+SNAP_TIME = 0.12           # back this close to the middle within SNAP_TIME runs the slot
 HIDE_DELAY = 0.15          # seconds after the thumb lifts before the wheel hides
 PREFIX_GAP = 0.08          # seconds between Ctrl+B and the herdr action key
 
@@ -228,6 +234,7 @@ class Wheel(Gtk.DrawingArea):
     def __init__(self):
         super().__init__()
         self.title, self.slots, self.selected = "", [], None
+        self.dot = (0.0, 0.0)       # stick position, -1..1 (x right, y up)
         self.set_content_width(SIZE)
         self.set_content_height(SIZE)
         self.set_draw_func(self.draw)
@@ -236,7 +243,8 @@ class Wheel(Gtk.DrawingArea):
         if not self.slots:          # hidden: window stays mapped but fully transparent
             return
         cx, cy = w / 2, h / 2
-        r_out, r_in = min(w, h) / 2 - 6, min(w, h) * 0.17
+        r_out = min(w, h) / 2 - 6
+        r_in = r_out * HUB
         n = len(self.slots) or 1
         step = 2 * math.pi / n
         cr.set_source_rgba(0.08, 0.09, 0.11, 0.96)
@@ -261,11 +269,26 @@ class Wheel(Gtk.DrawingArea):
             rl = (r_in + r_out) / 2 + 8
             self._text(cr, label, cx + rl * math.cos(mid), cy + rl * math.sin(mid), 19,
                        bold=(i == self.selected))
-        cr.set_source_rgba(0.14, 0.15, 0.18, 1)
+        cr.set_source_rgba(0.14, 0.15, 0.18, 1)        # centre = cancel zone
         cr.arc(cx, cy, r_in, 0, 2 * math.pi)
         cr.fill()
-        self._text(cr, self.title, cx, cy - 8, 22, bold=True)
-        self._text(cr, "let go to run", cx, cy + 18, 13, alpha=0.6)
+        cr.set_source_rgba(1, 1, 1, 0.22 if self.selected is not None else 0.45)
+        cr.set_line_width(2)
+        cr.set_dash([6, 6])
+        cr.arc(cx, cy, r_in, 0, 2 * math.pi)
+        cr.stroke()
+        cr.set_dash([])
+        self._text(cr, self.title, cx, cy - 10, 22, bold=True)
+        self._text(cr, "let go to run" if self.selected is not None else "centre = cancel",
+                   cx, cy + 16, 13, alpha=0.6)
+        dx, dy = self.dot                              # live stick position
+        px, py = cx + dx * (r_out - 10), cy - dy * (r_out - 10)
+        cr.set_source_rgba(0, 0, 0, 0.6)
+        cr.arc(px, py, 10, 0, 2 * math.pi)
+        cr.fill()
+        cr.set_source_rgba(1, 1, 1, 1)
+        cr.arc(px, py, 7, 0, 2 * math.pi)
+        cr.fill()
 
     @staticmethod
     def _text(cr, text, x, y, size, bold=False, alpha=1.0):
@@ -287,7 +310,11 @@ class App(Gtk.Application):
         self.last_touch = 0.0
         self.prev_r1 = False
         self.last_high = 0.0        # last time the stick was pushed out far enough to select
-        self.pending = False        # an update is already queued for the UI thread
+        self.last_draw = 0.0
+        self.prev_touched = False
+        self.pending = False        # a redraw is already queued for the UI thread
+        self.view = {"title": "", "slots": [], "selected": None, "dot": (0.0, 0.0)}
+        self.candidate, self.candidate_since = None, 0.0   # slot being switched to
         self.locked = None          # side that just fired; ignore it until the thumb lifts
 
     def do_activate(self):
@@ -304,7 +331,7 @@ class App(Gtk.Application):
         self.hold()
         if DEMO:                    # --demo <left|right> <slot>: show a wheel for 4 s (for testing)
             self.open(DEMO[0])
-            self.selected = self.wheel.selected = int(DEMO[1])
+            self.selected = self.view["selected"] = int(DEMO[1])
             GLib.timeout_add(4000, lambda: self.quit())
             return
         threading.Thread(target=self.read_loop, daemon=True).start()
@@ -315,7 +342,8 @@ class App(Gtk.Application):
         if surf:
             surf.set_input_region(cairo.Region())   # mouse goes straight to the app below
 
-    # -- input thread
+    # -- input thread: every controller report (~250 Hz) goes through step(), so quick
+    #    flicks are never missed; the UI thread only draws the latest state.
     def read_loop(self):
         while True:
             fd = find_deck_hidraw()
@@ -325,28 +353,14 @@ class App(Gtk.Application):
             try:
                 while True:
                     d = os.read(fd, 64)              # blocks until the next report
-                    os.set_blocking(fd, False)
-                    try:                             # drain anything queued; keep the newest
-                        while True:
-                            d2 = os.read(fd, 64)
-                            if len(d2) == 64:
-                                d = d2
-                    except BlockingIOError:
-                        pass
-                    os.set_blocking(fd, True)
                     if len(d) == 64 and d[2] == 0x09:
                         parse(d, self.left, self.right)
-                        if not self.pending:
-                            self.pending = True
-                            GLib.idle_add(self.update, priority=GLib.PRIORITY_HIGH)
+                        self.step(time.time())
             except OSError:
                 os.close(fd)
                 time.sleep(1)
 
-    # -- UI thread
-    def update(self):
-        self.pending = False
-        now = time.time()
+    def step(self, now):
         sticks = {"left": self.left, "right": self.right}
 
         def engaged(s):
@@ -362,34 +376,69 @@ class App(Gtk.Application):
         if self.active:
             s = sticks[self.active]
             mag = math.hypot(s.x, s.y)
-            if self.selected is not None and mag < RELEASE_DEFLECT:
-                # stick back in the centre: a quick snap-back runs the slot, easing back cancels
-                if now - self.last_high <= FLICK_TIME:
-                    self.fire(f"let go after {int((now - self.last_high) * 1000)} ms")
+            if mag > self.dbg["peak"]:
+                self.dbg.update(peak=mag, ang=math.degrees(math.atan2(s.x, s.y)) % 360)
+            self.dbg["touch"] += s.touched
+            self.touch_seen |= s.touched
+            self.dbg["n"] += 1
+            self.view["dot"] = (max(-1.0, min(1.0, s.x / 32767)), max(-1.0, min(1.0, s.y / 32767)))
+            if mag > SELECT_DEFLECT:                 # update the highlight first ...
+                self.last_high = now
+                ang = math.atan2(s.x, s.y) % (2 * math.pi)   # 0 = up, clockwise
+                n = len(WHEELS[self.active][1])
+                sel = int(round(ang / (2 * math.pi / n))) % n
+                if self.selected is None or sel == self.selected:
+                    self.selected, self.candidate = sel, None
+                elif sel != self.candidate:
+                    self.candidate, self.candidate_since = sel, now
+                elif now - self.candidate_since >= SWITCH_HOLD:
+                    self.selected, self.candidate = sel, None
+            if self.selected is not None:            # ... then check for a let-go
+                if self.prev_touched and not s.touched:
+                    self.fire("thumb lifted")        # thumb lifted off the stick: run the slot
+                    self.prev_r1, self.prev_touched = R1["down"], False
+                    return
+                if (not self.touch_seen and mag < SNAP_DEFLECT
+                        and now - self.last_high <= SNAP_TIME):
+                    self.fire(f"snapped back in {int((now - self.last_high) * 1000)} ms")
                     self.prev_r1 = R1["down"]
-                    return False
-                print(f"{self.active} wheel: eased back, cancelled", flush=True)
-                self.selected = self.wheel.selected = None
-                self.wheel.queue_draw()
+                    return
+                if (mag < SELECT_DEFLECT and (s.touched or not self.touch_seen)
+                        and now - self.last_high > CANCEL_DWELL):
+                    print(f"{self.active} wheel: dot in centre circle, cancelled", flush=True)
+                    self.selected = None
+            self.prev_touched = s.touched
             if engaged(s):
                 self.last_touch = now
-                if mag > SELECT_DEFLECT:
-                    self.last_high = now
-                    ang = math.atan2(s.x, s.y) % (2 * math.pi)   # 0 = up, clockwise
-                    n = len(WHEELS[self.active][1])
-                    sel = int(round(ang / (2 * math.pi / n))) % n
-                    if sel != self.selected:
-                        self.selected = self.wheel.selected = sel
-                        self.wheel.queue_draw()
                 if R1["down"] and not self.prev_r1:
                     if self.selected is None:
                         print(f"{self.active} wheel: R1 pressed but no slot highlighted", flush=True)
+                    else:
+                        self.fire("R1")
                         self.prev_r1 = True
-                        return False
-                    self.fire("R1")
+                        return
             elif now - self.last_touch > HIDE_DELAY:
+                d = self.dbg
+                print(f"{self.active} wheel: closed, nothing run (peak {int(d['peak'])}/{SELECT_DEFLECT} "
+                      f"at {int(d['ang'])} deg, touched {d['touch']}/{d['n']} reports, "
+                      f"selected {self.selected})", flush=True)
                 self.close()
+            self.view["selected"] = self.selected
+            self.request_draw(now)
         self.prev_r1 = R1["down"]
+
+    def request_draw(self, now, force=False):
+        if (force or now - self.last_draw > 0.011) and not self.pending:
+            self.last_draw, self.pending = now, True
+            GLib.idle_add(self.draw, priority=GLib.PRIORITY_HIGH)
+
+    # -- UI thread
+    def draw(self):
+        self.pending = False
+        v = dict(self.view)
+        self.wheel.title, self.wheel.slots = v["title"], v["slots"]
+        self.wheel.selected, self.wheel.dot = v["selected"], v["dot"]
+        self.wheel.queue_draw()
         return False
 
     def fire(self, how):
@@ -401,17 +450,19 @@ class App(Gtk.Application):
 
     def open(self, side):
         print(f"{side} wheel: open", flush=True)
-        self.active, self.selected = side, None
-        self.wheel.title, self.wheel.slots = WHEELS[side]
-        self.wheel.selected = None
+        self.active, self.selected, self.candidate = side, None, None
+        self.dbg = {"peak": 0.0, "ang": 0.0, "touch": 0, "n": 0}
+        self.touch_seen = False     # did the touch sensor see the thumb during this use?
+        title, slots = WHEELS[side]
+        self.view.update(title=title, slots=slots, selected=None, dot=(0.0, 0.0))
+        self.prev_touched = True
         self.last_touch = time.time()
-        self.wheel.queue_draw()
+        self.request_draw(self.last_touch, force=True)
 
     def close(self):
         self.active = self.selected = None
-        self.wheel.slots, self.wheel.selected = [], None
-        self.wheel.queue_draw()
-
+        self.view.update(slots=[], selected=None)
+        self.request_draw(time.time(), force=True)
 
 DEMO = sys.argv[2:4] if sys.argv[1:2] == ["--demo"] else None
 
