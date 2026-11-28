@@ -20,7 +20,7 @@ to its stick, in the top half of the screen, so Steam's on-screen keyboard never
 - **Left stick:** ↑ New tab · ↗ Next tab · → Next window · ↘ Next desktop · ↓ Close tab ·
   ↙ Prev desktop · ← Prev window · ↖ Prev tab (tabs are herdr tabs; windows cycle through all
   windows on the desktop in a fixed order; desktops via KWin)
-- **Right stick, Edit:** Ctrl+B, Paste, Shift+Tab, Newline, Ctrl+C, Esc Esc, Clear line, Copy
+- **Right stick, Edit:** Ctrl+B, Paste, Shift+Tab, Newline, Ctrl+S, Ctrl+C, Ctrl+X, Esc Esc, Clear line, Copy
   (clockwise from the top)
 
 Edit `WHEELS` near the top of `deck_wheel.py` to change them.
