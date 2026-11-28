@@ -344,7 +344,10 @@ class Wheel(Gtk.DrawingArea):
 
 class App(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id=APP_ID)
+        # --demo must not attach to a running instance: GTK would forward the activation
+        # and the service would build a second set of windows and reader threads
+        flags = Gio.ApplicationFlags.NON_UNIQUE if DEMO else Gio.ApplicationFlags.DEFAULT_FLAGS
+        super().__init__(application_id=APP_ID, flags=flags)
         self.kb = Keyboard()
         self.left, self.right = Stick("left"), Stick("right")
         self.active = None          # side whose wheel is shown
@@ -360,6 +363,8 @@ class App(Gtk.Application):
         self.locked = None          # side that just fired; ignore it until the thumb lifts
 
     def do_activate(self):
+        if getattr(self, "wheels", None):   # activated again (e.g. a second launch): already set up
+            return
         css = Gtk.CssProvider()
         css.load_from_data(b"window, window.background { background: transparent; box-shadow: none; }")
         Gtk.StyleContext.add_provider_for_display(
