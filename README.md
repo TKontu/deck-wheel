@@ -25,6 +25,21 @@ to its stick, in the top half of the screen, so Steam's on-screen keyboard never
 
 Edit `WHEELS` near the top of `deck_wheel.py` to change them.
 
+### Smooth scrolling on the left trackpad
+
+Steam only sends whole wheel clicks from a trackpad, while the Deck's built-in fallback mode
+(what the pads do while Steam is closed) scrolls smoothly with inertia. deck-wheel reads the
+left pad itself and copies that fallback, measured from a recording of it, slowed to about
+30% so the page follows the thumb about 1:1, like paper: natural direction (finger up moves
+the page up), high-resolution wheel events, and a flick coasts and slows down over about
+0.3 s. It pauses while Steam's keyboard is open (the pads type then) and while Steam isn't
+running (the fallback scrolls by itself then).
+
+Steam's own scrolling on the left pad has to be off so the two don't scroll at once: in the
+Desktop layout (and any layout for apps you scroll in) keep the left pad's click and remove
+its scroll bindings. Tune speed and inertia with `PAD_UNITS_PER_STEP` and the `COAST_*`
+values in `deck_wheel.py`.
+
 ### Room for the on-screen keyboard
 
 Steam's on-screen keyboard (Steam + X, or X in the Desktop layout) floats over the
@@ -46,12 +61,13 @@ window, so nothing is left shrunk.
 ## How it works
 
 - **Input:** reads the Deck controller's raw HID reports (`/dev/hidraw*`, report `0x09`)
-  alongside Steam: stick positions, the sticks' touch sensors, and R1. Every report (~250 Hz)
+  alongside Steam: stick positions, the sticks' touch sensors, R1, and the left trackpad. Every report (~250 Hz)
   is evaluated in the input thread, so quick flicks aren't missed; the UI only draws the
   latest state. Swaying with the thumb on the stick never runs a slot, and the spring's
   overshoot on release can't switch to the opposite slot.
 - **Output:** types hotkeys through a `uinput` virtual keyboard, so it works in every app,
-  Wayland-native ones included. It corrects the `-` key position for de/fi/se layouts.
+  Wayland-native ones included. Scrolling goes through a second, mouse-type `uinput`
+  device. It corrects the `-` key position for de/fi/se layouts.
 - **UI:** a GTK4 window that stays mapped, transparent and click-through. A KWin rule
   keeps it on top and stops it taking focus, so keystrokes go to the app underneath.
 

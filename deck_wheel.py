@@ -183,6 +183,7 @@ class Stick:
 
 
 R1 = {"down": False}
+PAD = {"touched": False, "y": 0}   # left trackpad
 
 
 def parse(d, left, right):
@@ -193,6 +194,8 @@ def parse(d, left, right):
     left.touched = bool(d[13] & 0x40)
     right.touched = bool(d[13] & 0x80)
     left.x, left.y, right.x, right.y = struct.unpack_from("<hhhh", d, 48)
+    PAD["touched"] = bool(d[10] & 0x08)
+    PAD["y"] = struct.unpack_from("<h", d, 18)[0]   # -32767 (bottom) .. 32767 (top)
 
 # ---------------------------------------------------------------- on-screen keyboard room
 
@@ -342,6 +345,99 @@ class Wheel(Gtk.DrawingArea):
         cr.show_text(text)
 
 
+# ---------------------------------------------------------------- left trackpad scrolling
+#
+# Steam only sends whole wheel clicks from a trackpad. The Deck's built-in fallback mode
+# (active while Steam is closed) scrolls smoothly with inertia, so this copies it, measured
+# from that mode: ~1 wheel step per 1000 pad units, natural direction, and a flick coasts
+# at its lift-off speed, slowing exponentially (~0.2 s). Steam's Desktop layout keeps only
+# the pad click, so the two don't scroll at once.
+PAD_UNITS_PER_STEP = 3600   # pad travel (full height = 65534) per wheel step: ~30% of the fallback,
+                            # tuned so the page follows the thumb about 1:1, like paper
+NATURAL = True              # finger up moves the page up, like the fallback mode
+COAST_GAIN = 1.6            # coasting starts at the flick's speed times this
+COAST_TAU = 0.2             # s: how quickly a flick slows down
+COAST_MIN = 100000          # pad units/s at lift-off needed to coast at all
+COAST_STOP = 15000          # pad units/s at which coasting ends
+PEAK_HOLD = 0.08            # s: how long the top speed of a swipe counts for its coast
+PAD_GLITCH = 12000          # a jump bigger than this in one report (~4 ms) is noise
+
+
+def steam_running(cache={"t": 0.0, "up": True}):
+    """Without Steam the Deck's fallback mode scrolls by itself; don't double it."""
+    now = time.time()
+    if now - cache["t"] > 2:
+        cache["t"] = now
+        try:
+            pid = open(os.path.expanduser("~/.steam/steam.pid")).read().strip()
+            cache["up"] = bool(pid) and os.path.exists(f"/proc/{pid}")
+        except OSError:
+            cache["up"] = False
+    return cache["up"]
+
+
+class PadScroll:
+    def __init__(self):
+        # REL_X/REL_Y + BTN_LEFT make udev tag it as a mouse, so the compositor takes its wheel
+        self.ui = UInput({e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE],
+                          e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_WHEEL_HI_RES]},
+                         name="deck-wheel scroll")
+        self.prev = None            # (time, y) of the last report while touched
+        self.v = 0.0                # finger speed, pad units/s (smoothed)
+        self.peak = 0.0             # recent top speed: swipes often end at the pad's edge,
+                                    # where the position stops changing just before lift-off
+        self.coast = 0.0            # coasting speed after a flick
+        self.last = 0.0
+        self.hires = 0.0            # hi-res wheel units not sent yet
+        self.notch = 0              # hi-res units sent since the last whole REL_WHEEL step
+
+    def step(self, now, touched, y, enabled):
+        dt, self.last = now - self.last, now
+        if not enabled:
+            self.prev, self.v, self.coast = None, 0.0, 0.0
+            return
+        moved = 0.0
+        if touched:
+            self.coast = 0.0
+            if self.prev:
+                pdt, dy = now - self.prev[0], y - self.prev[1]
+                if 0 < pdt and abs(dy) < PAD_GLITCH:
+                    moved = dy
+                    self.v += (dy / pdt - self.v) * min(1.0, pdt / 0.03)
+                    self.peak *= math.exp(-pdt / PEAK_HOLD)
+                    if self.v * self.peak < 0 or abs(self.v) > abs(self.peak):
+                        self.peak = self.v
+            else:
+                self.v = self.peak = 0.0
+            self.prev = (now, y)
+        else:
+            if self.prev:           # thumb lifted: a fast enough flick keeps going
+                self.prev = None
+                self.coast = self.peak * COAST_GAIN if abs(self.peak) > COAST_MIN else 0.0
+                self.v = self.peak = 0.0
+            elif self.coast and dt < 0.1:
+                moved = self.coast * dt
+                self.coast *= math.exp(-dt / COAST_TAU)
+                if abs(self.coast) < COAST_STOP:
+                    self.coast = 0.0
+        if moved:
+            self.emit(-moved if NATURAL else moved)
+
+    def emit(self, units):
+        self.hires += units * 120 / PAD_UNITS_PER_STEP
+        n = int(self.hires)
+        if not n:
+            return
+        self.hires -= n
+        self.ui.write(e.EV_REL, e.REL_WHEEL_HI_RES, n)
+        self.notch += n
+        steps = int(self.notch / 120)   # apps without hi-res support get whole steps
+        if steps:
+            self.notch -= steps * 120
+            self.ui.write(e.EV_REL, e.REL_WHEEL, steps)
+        self.ui.syn()
+
+
 class App(Gtk.Application):
     def __init__(self):
         # --demo must not attach to a running instance: GTK would forward the activation
@@ -349,6 +445,7 @@ class App(Gtk.Application):
         flags = Gio.ApplicationFlags.NON_UNIQUE if DEMO else Gio.ApplicationFlags.DEFAULT_FLAGS
         super().__init__(application_id=APP_ID, flags=flags)
         self.kb = Keyboard()
+        self.pad = None if DEMO else PadScroll()
         self.left, self.right = Stick("left"), Stick("right")
         self.active = None          # side whose wheel is shown
         self.selected = None
@@ -449,7 +546,11 @@ class App(Gtk.Application):
                     d = os.read(fd, 64)              # blocks until the next report
                     if len(d) == 64 and d[2] == 0x09:
                         parse(d, self.left, self.right)
-                        self.step(time.time())
+                        now = time.time()
+                        self.step(now)
+                        # Steam's keyboard uses the pads for typing while it is open
+                        self.pad.step(now, PAD["touched"], PAD["y"],
+                                      not OSK["open"] and steam_running())
             except OSError:
                 os.close(fd)
                 time.sleep(1)
